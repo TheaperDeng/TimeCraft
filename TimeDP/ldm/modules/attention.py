@@ -112,6 +112,7 @@ class CrossAttention(nn.Module):
             v = self.to_v(context)
 
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
+        # print("q, k, v shapes:", q.shape, k.shape, v.shape)
 
         sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
 
@@ -138,7 +139,7 @@ class BasicTransformerBlock(nn.Module):
     def __init__(self, dim, n_heads, d_head, dropout=0., context_dim=None, gated_ff=True, checkpoint=False, use_pam=False):
         super().__init__()
         self.attn1 = CrossAttention(query_dim=dim, heads=n_heads, dim_head=d_head, dropout=dropout)  # is a self-attention
-        self.ff = FeedForward(dim, dropout=dropout, glu=gated_ff)
+        self.ff = FeedForward(dim+64, dim_out=dim, dropout=dropout, glu=gated_ff)
         self.attn2 = CrossAttention(query_dim=dim, context_dim=context_dim,
                                     heads=n_heads, dim_head=d_head, dropout=dropout, use_pam=use_pam)  # is self-attn if context is none
         self.norm1 = nn.LayerNorm(dim)
@@ -146,13 +147,26 @@ class BasicTransformerBlock(nn.Module):
         self.norm3 = nn.LayerNorm(dim)
         self.checkpoint = checkpoint
 
-    def forward(self, x, context=None, mask=None):
-        return checkpoint(self._forward, (x, context, mask), self.parameters(), self.checkpoint)
+    def forward(self, x, context=None, mask=None, emb_class=None):
+        return checkpoint(self._forward, (x, context, mask, emb_class), self.parameters(), self.checkpoint)
 
-    def _forward(self, x, context=None, mask=None):
+    def _forward(self, x, context=None, mask=None, emb_class=None):
+        # if emb_class is not None:
+        #     print("I received emb_class:", emb_class.shape)
+        # else:
+        #     print("emb_class is None, no class condition")
         x = self.attn1(self.norm1(x)) + x
         x = self.attn2(self.norm2(x), context=context, mask=mask) + x
-        x = self.ff(self.norm3(x)) + x
+
+        if emb_class is not None:
+            emb_class = emb_class[:, None, :]   # → (B, 1, D), broadcasts across N
+            emb_class_expanded = emb_class.expand(-1, x.shape[1], -1)
+            # print(x.shape, emb_class_expanded.shape)
+            x_mod = torch.cat((self.norm3(x), emb_class_expanded), dim=-1)        # → (B, N, D)
+        else:
+            x_mod = torch.cat((self.norm3(x), torch.zeros(x.shape[0], x.shape[1], 64).to("cuda")), dim=-1)
+        x = self.ff(x_mod) + x
+        # print("x.shape after ff:", x.shape)
         return x
 
     
@@ -188,15 +202,19 @@ class Spatial1DTransformer(nn.Module):
                                               stride=1,
                                               padding=0))
 
-    def forward(self, x, context=None, mask=None):
+    def forward(self, x, context=None, mask=None, emb_class=None):
         # note: if no context is given, cross-attention defaults to self-attention
+        # if emb_class is not None:
+        #     print("I received emb_class:", emb_class.shape)
+        # else:
+        #     print("emb_class is None, no class condition")
         b, c, w = x.shape
         x_in = x
         x = self.norm(x)
         x = self.proj_in(x)
         x = rearrange(x, 'b c w -> b w c')
         for block in self.transformer_blocks:
-            x = block(x, context=context, mask=mask)
+            x = block(x, context=context, mask=mask, emb_class=emb_class)
         x = rearrange(x, 'b w c -> b c w', w=w)
         x = self.proj_out(x)
         return x + x_in

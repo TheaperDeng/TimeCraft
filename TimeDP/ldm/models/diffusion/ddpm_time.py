@@ -18,7 +18,8 @@ from einops import rearrange
 from contextlib import contextmanager
 from functools import partial
 from tqdm import tqdm
-from pytorch_lightning.utilities.distributed import rank_zero_only
+# from pytorch_lightning.utilities.distributed import rank_zero_only
+from lightning_utilities.core.rank_zero import rank_zero_only
 
 from ldm.util import exists, default, count_params, instantiate_from_config
 from ldm.modules.ema import LitEma
@@ -396,7 +397,9 @@ class LatentDiffusion(DDPM):
                  scale_factor=1.0,
                  scale_by_std=False,
                  cond_drop_prob = None,
+                 class_condition=False,
                  *args, **kwargs):
+        self.class_condition = class_condition
         self.num_timesteps_cond = default(num_timesteps_cond, 1)
         self.scale_by_std = scale_by_std
         assert self.num_timesteps_cond <= kwargs['timesteps']
@@ -438,8 +441,8 @@ class LatentDiffusion(DDPM):
 
     @rank_zero_only
     @torch.no_grad()
-    def on_train_batch_start(self, batch, batch_idx, dataloader_idx):
-    # def on_train_batch_start(self, batch, batch_idx):
+    # def on_train_batch_start(self, batch, batch_idx, dataloader_idx):
+    def on_train_batch_start(self, batch, batch_idx):
         # only for very first batch
         if self.scale_by_std and self.current_epoch == 0 and self.global_step == 0 and batch_idx == 0 and not self.restarted_from_ckpt:
             assert self.scale_factor == 1., 'rather not use custom rescaling and std-rescaling simultaneously'
@@ -605,7 +608,7 @@ class LatentDiffusion(DDPM):
         return self.p_losses(x, c, t, *args, **kwargs)
 
     def apply_model(self, x_noisy, t, cond, mask, cfg_scale=1, cond_drop_prob=None, 
-                    sampled_concept= None, sampled_index= None, sub_scale=None, **kwargs):
+                    sampled_concept= None, sampled_index= None, sub_scale=None, data_key=None, **kwargs):
 
         if isinstance(cond, dict):
             # hybrid case, cond is exptected to be a dict
@@ -615,12 +618,17 @@ class LatentDiffusion(DDPM):
                 cond = [cond]
             key = 'c_concat' if self.model.conditioning_key == 'concat' else 'c_crossattn'
             cond = {key: cond, 'mask': mask}
-        
+
+        # if data_key is not None:
+        #     print("class condition is ON")
+        # else:
+        #     print("class condition is OFF")
+
         if cond_drop_prob is None:
-            x_recon = self.model.cfg_forward(x_noisy, t, cfg_scale=cfg_scale, sampled_concept = sampled_concept, sampled_index = sampled_index, sub_scale = sub_scale, **cond)
+            x_recon = self.model.cfg_forward(x_noisy, t, cfg_scale=cfg_scale, sampled_concept=sampled_concept, sampled_index=sampled_index, sub_scale=sub_scale, data_key=data_key, **cond)
         else:
-            x_recon = self.model.forward(x_noisy, t, cond_drop_prob=cond_drop_prob, 
-                                            sampled_concept = sampled_concept, sampled_index = sampled_index, sub_scale = sub_scale, **cond)
+            x_recon = self.model.forward(x_noisy, t, cond_drop_prob=cond_drop_prob,
+                                          sampled_concept=sampled_concept, sampled_index=sampled_index, sub_scale=sub_scale, data_key=data_key, **cond)
 
         return x_recon
 
@@ -629,6 +637,7 @@ class LatentDiffusion(DDPM):
                extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape)
 
     def p_losses(self, x_start, condmask, t, noise=None, data_key=None):
+        # print("data_key:", data_key, data_key.shape)  # (b,)
         noise = default(noise, lambda: torch.randn_like(x_start))
         if condmask is not None:
             cond, mask = condmask
@@ -637,7 +646,10 @@ class LatentDiffusion(DDPM):
             mask = None
         x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
 
-        model_output = self.apply_model(x_noisy, t, cond, mask, cond_drop_prob=self.cond_drop_prob)
+        if self.class_condition:
+            model_output = self.apply_model(x_noisy, t, cond, mask, cond_drop_prob=self.cond_drop_prob, data_key=data_key)
+        else:
+            model_output = self.apply_model(x_noisy, t, cond, mask, cond_drop_prob=self.cond_drop_prob)
 
         eps_pred = return_wrap(model_output, extract_into_tensor(self.shift_coef, t, x_start.shape))
 
@@ -857,6 +869,7 @@ class LatentDiffusion(DDPM):
                    ddim_steps=20, ddim_eta=1., return_keys=None, **kwargs):
 
         use_ddim = ddim_steps is not None
+        # use_ddim = False
         # plot_swapped_concepts = True
 
         log = dict()
@@ -874,7 +887,7 @@ class LatentDiffusion(DDPM):
         if sample:
             with self.ema_scope("Plotting"):
                 samples, z_denoise_row = self.sample_log(cond=c,batch_size=N,ddim=use_ddim,
-                                                         ddim_steps=ddim_steps,eta=ddim_eta, mask=mask)
+                                                         ddim_steps=ddim_steps,eta=ddim_eta, mask=mask, data_key=batch['data_key'][:N])
             x_samples = self.decode_first_stage(samples)
             log["samples"] = x_samples
             with self.ema_scope("Uncond Plotting"):
@@ -930,7 +943,7 @@ class DiffusionWrapper(pl.LightningModule):
             cc = torch.cat(c_crossattn, 1)
         else:
             cc = None
-        out = self.diffusion_model(x, t, context=cc, mask=mask, cond_drop_prob=cond_drop_prob)
+        out = self.diffusion_model(x, t, context=cc, mask=mask, cond_drop_prob=cond_drop_prob, **{"data_key": kwargs.get("data_key", None)})
         
         return out
         

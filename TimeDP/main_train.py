@@ -14,7 +14,9 @@ if __name__ == "__main__":
     data_root = os.environ['DATA_ROOT']
 
     parser = get_parser()
-    parser = Trainer.add_argparse_args(parser)
+    parser.add_argument("--max_steps", type=int, default=50000)
+    parser.add_argument("--benchmark", type=bool, default=True)
+    # parser = Trainer.add_argparse_args(parser)
 
     model, data, trainer, opt, logdir, melk = init_model_data_trainer(parser)
 

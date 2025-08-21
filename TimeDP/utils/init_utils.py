@@ -13,6 +13,7 @@ from ldm.util import instantiate_from_config
 from pathlib import Path
 import datetime
 from utils.cli_utils import nondefault_trainer_args
+import time
 
 data_root = os.environ['DATA_ROOT']
 
@@ -56,7 +57,7 @@ def init_model_data_trainer(parser):
     else:
         base_lr = config.model['base_learning_rate']
         
-    nowname = f"{name.split('-')[-1]}_{opt.seq_len}_nl_{opt.num_latents}_lr{base_lr:.1e}_bs{opt.batch_size}"
+    nowname = f"{name.split('-')[-1]}_{opt.seq_len}_nl_{opt.num_latents}_lr{base_lr:.1e}_bs{opt.batch_size}_time{time.time()}"
     
     
     if opt.uncond:
@@ -111,7 +112,8 @@ def init_model_data_trainer(parser):
 
     # trainer and callbacks
     trainer_kwargs = prepare_trainer_configs(nowname, logdir, opt, lightning_config, ckptdir, model, now, cfgdir, config, trainer_opt)
-    trainer = Trainer.from_argparse_args(trainer_opt, **trainer_kwargs)
+    # trainer = Trainer.from_argparse_args(trainer_opt, **trainer_kwargs)
+    trainer = Trainer(benchmark=trainer_opt.benchmark, max_steps=trainer_opt.max_steps, **trainer_kwargs)
     trainer.logdir = logdir  ###
 
     # data
@@ -122,7 +124,7 @@ def init_model_data_trainer(parser):
     # calling these ourselves should not be necessary but it is.
     # lightning still takes care of proper multiprocessing though
     data.prepare_data()
-    data.setup()
+    data.setup("fit")
     assert config.data.params.input_channels == 1, \
         "Assertion failed: Only univariate input is supported. Please ensure input_channels == 1."
     print("#### Data Preparation Finished #####")

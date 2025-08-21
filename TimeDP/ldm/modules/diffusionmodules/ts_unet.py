@@ -57,12 +57,12 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
     support it as an extra input.
     """
 
-    def forward(self, x, emb, context=None, mask=None):
+    def forward(self, x, emb, context=None, mask=None, emb_class=None):
         for layer in self:
             if isinstance(layer, TimestepBlock):
                 x = layer(x, emb)
             elif isinstance(layer, Spatial1DTransformer):
-                x = layer(x, context, mask=mask)
+                x = layer(x, context, mask=mask, emb_class=emb_class)
             else:
                 x = layer(x)
         return x
@@ -426,6 +426,7 @@ class UNetModel(nn.Module):
         conv_resample=True,
         dims=2,
         num_classes=None,
+        class_conditionnal_number=None,
         use_checkpoint=False,
         use_fp16=False,
         num_heads=-1,
@@ -483,6 +484,7 @@ class UNetModel(nn.Module):
         self.latent_unit = latent_unit
         self.latent_dim = repre_emb_channels
         self.use_pam = use_pam
+        self.class_conditionnal_number= class_conditionnal_number
         
         time_embed_dim = model_channels * 4
         self.time_embed = nn.Sequential(
@@ -493,6 +495,10 @@ class UNetModel(nn.Module):
 
         if self.num_classes is not None:
             self.label_emb = nn.Embedding(num_classes, time_embed_dim)
+
+        if self.class_conditionnal_number is not None:
+            self.class_embedding_dim = 64
+            self.class_emb = nn.Embedding(class_conditionnal_number, self.class_embedding_dim)
         
         if self.use_cfg:
             self.cond_emb_channels = repre_emb_channels * latent_unit if self.use_cfg else None
@@ -703,6 +709,13 @@ class UNetModel(nn.Module):
         :param y: an [N] Tensor of labels, if class-conditional.
         :return: an [N x C x ...] Tensor of outputs.
         """
+        if kwargs["data_key"] is not None:
+            # print("class condition is ON, classes are {}".format(kwargs["data_key"]))
+            # print("class condition is ON")
+            emb_class = self.class_emb(kwargs["data_key"])
+        else:
+            # print("class condition is OFF")
+            emb_class = None
         # context = None
         assert (y is not None) == (
             self.num_classes is not None
@@ -733,15 +746,15 @@ class UNetModel(nn.Module):
         h = x.type(self.dtype)
         k = 0
         for module in self.input_blocks:
-            h = module(h, emb, context_emb, mask=mask)
+            h = module(h, emb, context_emb, mask=mask, emb_class=emb_class)
             hs.append(h)
             if k == 5:
                 a = 1
             k += 1
-        h = self.middle_block(h, emb, context_emb, mask=mask)
+        h = self.middle_block(h, emb, context_emb, mask=mask, emb_class=emb_class)
         for module in self.output_blocks:
             h = th.cat([h, hs.pop()], dim=1)
-            h = module(h, emb, context_emb, mask=mask)
+            h = module(h, emb, context_emb, mask=mask, emb_class=emb_class)
         h = h.type(x.dtype)
         pred = self.out(h)
         return Return(pred = pred)
